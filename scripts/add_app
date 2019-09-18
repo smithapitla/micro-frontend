@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+#set -x
+
+debug=''
+script="$(perl -e "use Cwd 'abs_path'; print abs_path('$0');")"
+script_dir="$(dirname "$script")"
+root_dir="$(dirname "$script_dir")"
+PATH="$script_dir:$PATH"
+
+VOICE_GITHUB_URL="${VOICE_GITHUB:-https://github.com}"
+VOICE_GITHUB_ORG="${VOICE_GITHUB_ORG:-micro-frontends}"
+repo_name=''
+repo_url=''
+force=''
+prompt=''
+domain_name=''
+container_name=''
+
+function check_dir() {
+  if [[ -e "$1" ]]; then
+    if [[ -z "$force" ]]; then
+      die "Directory already exists: $1"
+    fi
+    rm -rf "$1"
+  fi
+}
+
+function die() {
+  echo "$@" >&2
+  exit 1
+}
+
+function debug() {
+  [[ ! -z "$debug" ]] && echo "$@"
+}
+
+function debug_var() {
+  debug "$1 = '${!1}'"
+}
+
+function getHelp() {
+  cat <<EOF
+Usage:
+
+  add_container [-o|--org <org name>] [-r|repo] <repo name> [options]
+
+  add_container --url <repo url> [options]
+
+Clones the specified repo and moves it to the expected domain/container directory.
+
+Options:
+  -h, --help              Display this message.
+  -o, --org <org name>    The org the repo (fork) is in. If not specified, the
+                          value of \$VOICE_GITHUB_ORG ($VOICE_GITHUB_ORG) will
+                          be used.
+  -r, --repo <repo name>  The name of the repo (fork) to clone.
+  --url <repo url>        The URL of the repo to clone. If specified, this value
+                          will supercede the values specified in the org and
+                          repo arguments.
+  -d, --domain <domain name>
+                          The name of the domain. Overrides the value of the
+                          voice.domain field from the package.json will
+                          be used.
+  -c, --container <container name>
+                          The name of the container. Overrides the value of the
+                          voice.container field from the package.json will
+                          be used.
+  --f, --force            Overwrite existing directories.
+  --prompt                Prompt the user to confirm data.
+
+Examples:
+
+  Given:
+   - You have cloned the voice-framework/sage-portal repo
+   - You have have added voice-framework/sage-portal/scripts to your \$PATH
+   - Your GitHub org is called "my-org"
+   - Your GitHub org contains a foo_bar repo
+   - The package.json specifies "package" property is "@my-org/foo_bar"
+
+  Clone https://github.com/my-org/foo-bar.git and move it to
+  the domains/foo/bar directory:
+
+    # Specify the org using the \$VOICE_GITHUB_ORG environment variable:
+    $ export VOICE_GITHUB_ORG='my-org' # Put this in your .bash_profile
+    $ add_container foo_bar
+
+    # Specify the org using an argument:
+    $ add_container --org my-org foo_bar
+
+    # Use the full URL
+    # add-container --url https://github.com/my-org/foo_bar.git
+
+EOF
+}
+
+# Parse the command line
+while [[ ! -z "$1" ]]; do
+  case "$1" in
+  -o | --org)
+    shift
+    VOICE_GITHUB_ORG="$1"
+    ;;
+  -r | --repo)
+    shift
+    repo_name="$1"
+    ;;
+  --url)
+    shift
+    repo_url="$1"
+    ;;
+  -d | --domain)
+    shift
+    domain_name="$1"
+    ;;
+  -c | --container)
+    shift
+    container_name="$1"
+    ;;
+  -f | --force)
+    force='true'
+    ;;
+  --prompt)
+    prompt='true'
+    ;;
+  --argv-only)
+    argv_only='true'
+    debug='true'
+    ;;
+  --debug)
+    debug='true'
+    ;;
+  -h | --help)
+    getHelp
+    exit 0
+    ;;
+  *)
+    if [[ -z "$repo_name" ]]; then
+      repo_name="$1"
+    else
+      echo "Invalid argument: $1" >&2
+      getHelp >&2
+      exit 1
+    fi
+    ;;
+  esac
+  shift
+done
+
+if [[ ! -z "$prompt" ]]; then
+  if [[ ! -z "$repo_url" ]]; then
+    repo_url="$(prompt 'Repo URL' "$repo_url")"
+  else
+    VOICE_GITHUB_ORG="$(prompt 'GitHub Org' "$VOICE_GITHUB_ORG")"
+    repo_name="$(prompt 'Repo Name' "$repo_name")"
+  fi
+fi
+
+if [[ -z "$repo_name" ]]; then
+  if [[ -z "$repo_url" ]]; then
+    echo "Repo name not specified" >&2
+    getHelp >&2
+    exit 1
+  else
+    repo_name="$(basename "${repo_url%.git}")"
+  fi
+fi
+
+if [[ -z "$repo_url" ]]; then
+  repo_url="$VOICE_GITHUB_URL/$VOICE_GITHUB_ORG/$repo_name.git"
+fi
+
+if [[ ! -z "$debug" ]]; then
+  debug_var VOICE_GITHUB_URL
+  debug_var VOICE_GITHUB_ORG
+  debug_var repo_name
+  debug_var repo_url
+  debug_var domain_name
+  debug_var container_name
+fi
+
+[[ "$argv_only" == 'true' ]] && exit 0
+
+debug "Clone the repo"
+repo_dir="$root_dir/$repo_name"
+check_dir "$repo_dir"
+cd "$root_dir" || die "Cannot cd to $root_dir"
+git clone "$repo_url" || die "Cannot clone repo: $repo_url"
+
+debug "Get the domain and container names"
+if [[ -z "$domain_name" ]] || [[ -z "$container_name" ]]; then
+  package_json="$repo_dir/package.json"
+  package_name="$(json_prop name "$package_json" | sed 's/^.*\///')"
+
+  if [[ -z "$domain_name" ]]; then
+    domain_name="${package_name%_*}"
+  fi
+
+  if [[ -z "$container_name" ]]; then
+    container_name="${package_name#*_}"
+  fi
+fi
+if [[ ! -z $prompt ]]; then
+  domain_name="$(prompt Domain "$domain_name")"
+  container_name="$(prompt Container "$container_name")"
+fi
+debug_var domain_name
+debug_var container_name
+
+[[ -z "$domain_name" ]] && die "Cannot determine domain for repo $repo_name"
+[[ -z "$container_name" ]] && die "Cannot determine container for repo $repo_name"
+
+debug "Create the domain directory"
+domain_dir="$root_dir/domains/$domain_name"
+debug_var domain_dir
+[[ -d "$domain_dir" ]] || mkdir -p "$domain_dir" || die "Cannot create directory: $domain_dir"
+
+debug "Move the repo to the container"
+container_dir="$domain_dir/$container_name"
+echo "Moving repo to $container_dir"
+check_dir "$container_dir"
+debug_var container_dir
+mv "$repo_dir" "$container_dir" || die "Cannot move $repo_dir to $container_dir"
+
